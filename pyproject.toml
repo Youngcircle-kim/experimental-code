@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "event-caption-pilot"
+version = "0.1.0"
+description = "Reproducible minimal event segmentation and caption allocation pilots"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26,<3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9", "ruff>=0.9,<1"]
+video = ["opencv-python>=4.8,<5"]
+real = [
+    "torch>=2.2,<3",
+    "torchvision>=0.17,<1",
+    "transformers==4.57.1",
+    "Pillow>=10,<12",
+    "opencv-python>=4.8,<5",
+]
+
+[project.scripts]
+event-caption-pilot = "event_caption_pilot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["event_caption_pilot*"]
+
+[tool.ruff]
+line-length = 79
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

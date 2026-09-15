@@ -1,0 +1,13 @@
+{
+  "mode": "demo",
+  "backend": "demo",
+  "pilot": "both",
+  "seed": 42,
+  "detector": "D2",
+  "frame_budget": 16,
+  "caption_max_frames": 4,
+  "text_weight": 0.5,
+  "observation_strides": [1, 2, 4],
+  "output_dir": "outputs",
+  "cache_dir": ".cache/event_caption"
+}

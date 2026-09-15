@@ -1,0 +1,35 @@
+{
+  "videos": [
+    {
+      "video_id": "dev_video_001",
+      "source_id": "original_dev_video_001",
+      "split": "dev",
+      "path": "videos/dev_video_001.mp4",
+      "timestamp_mode": "constant_fps",
+      "questions": [
+        {
+          "question_id": "dev_q001",
+          "text": "What does the person do before placing food in the pot?",
+          "options": ["Chop the ingredients", "Wash the pot"],
+          "answer_index": 0,
+          "evidence_intervals": [[2.0, 8.0]]
+        }
+      ]
+    },
+    {
+      "video_id": "eval_video_001",
+      "source_id": "original_eval_video_001",
+      "split": "eval",
+      "path": "videos/eval_video_001.npz",
+      "questions": [
+        {
+          "question_id": "eval_q001",
+          "text": "What color is the container the person picks up?",
+          "options": ["Blue", "Red"],
+          "answer_index": 1,
+          "evidence_intervals": [[3.0, 5.0]]
+        }
+      ]
+    }
+  ]
+}
