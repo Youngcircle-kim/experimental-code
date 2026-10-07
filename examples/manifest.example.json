@@ -20,7 +20,8 @@
       "video_id": "eval_video_001",
       "source_id": "original_eval_video_001",
       "split": "eval",
-      "path": "videos/eval_video_001.npz",
+      "path": "videos/eval_video_001.mp4",
+      "timestamp_mode": "constant_fps",
       "questions": [
         {
           "question_id": "eval_q001",

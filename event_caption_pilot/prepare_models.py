@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .cache import write_json
+from .cli import parse_config
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def prepare_models(config: Config) -> dict[str, Any]:
         use_safetensors = any(
             filename.endswith(".safetensors") for filename in filenames
         )
-        patterns = ["*.json", "*.txt", "*.model", "*.safetensors"]
+        patterns = ["*.json", "*.txt", "*.model", "*.jinja", "*.safetensors"]
         if not use_safetensors:
             patterns.append("pytorch_model.bin")
         LOGGER.info("Downloading %s at commit %s", model_id, information.sha)
@@ -68,36 +69,46 @@ def main(arguments: list[str] | None = None) -> int:
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", default="mps")
-    parser.add_argument("--model-cache-dir", default=Config().model_cache_dir)
+    parser.add_argument("--config", type=Path,
+                        help="Preserve all experiment settings from this JSON")
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--model-cache-dir", default=None)
     parser.add_argument("--output-config", type=Path,
-                        default=Path("configs/real.mps.smoke.json"))
-    parser.add_argument("--manifest", default="data/perception_smoke/manifest.json")
+                        default=Path("configs/real.pinned.json"))
+    parser.add_argument("--manifest", default=None)
     arguments_parsed = parser.parse_args(arguments)
-    config = replace(
-        Config(), mode="real", backend="transformers",
-        manifest_path=arguments_parsed.manifest, device=arguments_parsed.device,
-        model_dtype="float16", seed_torch=True,
-        model_cache_dir=arguments_parsed.model_cache_dir,
-        output_dir="outputs/real_mps", cache_dir=".cache/captions_real_mps",
-        attention_implementation="eager", candidate_fps=1.0,
-        frame_budget=16, max_segments=3, uniform_segments=3,
-        caption_max_frames=4, caption_max_new_tokens=40,
-        observation_strides=(1, 2), encoder_batch_size=8,
-        vlm_min_pixels=12544, vlm_max_pixels=50176,
+    if arguments_parsed.output_config.exists():
+        raise FileExistsError(
+            f"Preserving existing config: {arguments_parsed.output_config}"
+        )
+    config = (
+        parse_config(["--config", str(arguments_parsed.config)])
+        if arguments_parsed.config is not None
+        else replace(
+            Config(), mode="real", backend="transformers",
+            manifest_path="data/perception_smoke/manifest.json",
+            device="cuda", model_dtype="bfloat16", seed_torch=True,
+            output_dir="outputs/real", cache_dir=".cache/event_caption_real",
+        )
     )
+    overrides = {
+        field: value for field, value in (
+            ("device", arguments_parsed.device),
+            ("manifest_path", arguments_parsed.manifest),
+            ("model_cache_dir", arguments_parsed.model_cache_dir),
+        ) if value is not None
+    }
+    config = replace(config, **overrides)
     config.validate()
     models = prepare_models(config)
     pinned = replace(
         config, encoder_revision=models["encoder"]["revision"],
         vlm_revision=models["vlm"]["revision"], local_files_only=True,
     )
-    if arguments_parsed.output_config.exists():
-        raise FileExistsError(
-            f"Preserving existing config: {arguments_parsed.output_config}"
-        )
     write_json(arguments_parsed.output_config, pinned.to_dict())
-    write_json(Path(config.model_cache_dir) / "download_provenance.json", models)
+    write_json(
+        Path(config.model_cache_dir) / "download_provenance.json", models
+    )
     LOGGER.info("Pinned offline config: %s", arguments_parsed.output_config)
     return 0
 

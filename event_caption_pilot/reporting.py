@@ -70,9 +70,7 @@ def export_artifacts(
         "question_id",
         "question",
         "answer_index",
-        "control_v_correct",
-        "treatment_t_correct",
-        "treatment_vt_correct",
+        *[f"{name}_correct" for name in report["conditions"]],
         "vt_change",
         "question_wall_seconds",
     ]
@@ -84,6 +82,34 @@ def export_artifacts(
         )
         writer.writeheader()
         writer.writerows(report["questions"])
+    summary = [
+        "# VQA ablation results", "", report["result_kind"], "",
+        "All accuracy differences below are percentage points. "
+        "Intervals use paired video-cluster bootstrap and are not "
+        "adjusted for multiple comparisons.", "",
+        "| Condition | Accuracy (%) |", "| --- | ---: |",
+    ]
+    for name, value in report["metrics"].get("accuracies", {}).items():
+        summary.append(f"| {name} | {100 * value:.2f} |")
+    for hypothesis, comparisons in report["metrics"].get(
+        "hypotheses", {}
+    ).items():
+        summary.extend([
+            "", f"## {hypothesis}", "",
+            "| Comparison | Difference (pp) | CI (pp) |",
+            "| --- | ---: | --- |",
+        ])
+        for name, result in comparisons.items():
+            interval = result["confidence_interval"]
+            ci = (
+                f"[{100 * interval[0]:.2f}, {100 * interval[1]:.2f}]"
+                if interval is not None else "unavailable"
+            )
+            difference = 100 * result["mean_difference"]
+            summary.append(f"| {name} | {difference:.2f} | {ci} |")
+    (output_path / "summary.md").write_text(
+        "\n".join(summary) + "\n", encoding="utf-8"
+    )
     manual_reviews = {
         "instructions": (
             "Fill from original video/frame inspection; "

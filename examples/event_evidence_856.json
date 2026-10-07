@@ -1,0 +1,10 @@
+{
+  "annotations": [
+    {
+      "video_id": "856",
+      "question_id": "856-1",
+      "candidate_indices": [1035, 1036],
+      "note": "Previously identified by the user. Post-hoc reference candidates; not exhaustive evidence annotations."
+    }
+  ]
+}

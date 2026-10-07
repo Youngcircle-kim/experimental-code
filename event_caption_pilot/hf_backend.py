@@ -1,8 +1,9 @@
-"""Optional frozen CLIP + Qwen2.5-VL integration; loaded only on request.
+"""Optional frozen CLIP + Qwen multimodal integration; loaded on request.
 
 Official API references consulted for this implementation:
 https://huggingface.co/docs/transformers/model_doc/clip
-https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/qwen2_5_vl
+https://huggingface.co/Qwen/Qwen3.8-27B
+https://huggingface.co/Qwen/Qwen3.5-4B
 https://huggingface.co/docs/transformers/chat_templating
 
 The repository's offline fixture tests do not execute these model weights.
@@ -43,13 +44,14 @@ class TransformersBackend:
             import torch
             from PIL import Image
             from transformers import (
+                AutoModelForMultimodalLM,
                 AutoProcessor,
                 CLIPModel,
-                Qwen2_5_VLForConditionalGeneration,
             )
         except ImportError as exc:
             raise ImportError(
-                "The transformers backend requires the optional 'real' "
+                "The transformers backend requires transformers==5.17.0 "
+                "and the optional 'real' "
                 "dependencies. No synthetic fallback will be used."
             ) from exc
         self.config = config
@@ -94,7 +96,7 @@ class TransformersBackend:
         self.vlm_commit: str | None = None
         if config.pilot != "a":
             self.vlm = (
-                Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                AutoModelForMultimodalLM.from_pretrained(
                     config.vlm_model,
                     revision=config.vlm_revision,
                     dtype=self.dtype,
@@ -111,8 +113,6 @@ class TransformersBackend:
             self.vlm_processor = AutoProcessor.from_pretrained(
                 config.vlm_model,
                 revision=self.vlm_commit or config.vlm_revision,
-                min_pixels=config.vlm_min_pixels,
-                max_pixels=config.vlm_max_pixels,
                 cache_dir=config.model_cache_dir,
                 local_files_only=config.local_files_only,
                 trust_remote_code=False,
@@ -138,6 +138,7 @@ class TransformersBackend:
         """
         return {
             "backend": "transformers",
+            "adapter_version": "qwen-multimodal-v2",
             "synthetic": False,
             "frozen": True,
             "encoder_model": self.config.encoder_model,
@@ -147,6 +148,9 @@ class TransformersBackend:
             "vlm_requested_revision": self.config.vlm_revision,
             "vlm_resolved_commit": self.vlm_commit,
             "vlm_loaded": self.vlm is not None,
+            "vlm_architecture": (
+                type(self.vlm).__name__ if self.vlm is not None else None
+            ),
             "device": str(self.device),
             "dtype": self.config.model_dtype,
             "attention_implementation": self.config.attention_implementation,
@@ -171,6 +175,7 @@ class TransformersBackend:
             "transformers_version": version("transformers"),
             "caption_decoding": "greedy",
             "caption_do_sample": False,
+            "enable_thinking": False,
             "caption_max_new_tokens": self.config.caption_max_new_tokens,
             "caption_prompt_version": self.config.caption_prompt_version,
             "qa_prompt_version": self.config.qa_prompt_version,
@@ -400,6 +405,9 @@ class TransformersBackend:
                 [{"role": "user", "content": content}],
                 tokenize=False,
                 add_generation_prompt=True,
+                # Caption embeddings and direct option likelihoods must not
+                # operate inside an unfinished reasoning block.
+                enable_thinking=False,
             )
         )
 
@@ -423,6 +431,14 @@ class TransformersBackend:
                 return_tensors="pt",
                 padding=False,
                 add_special_tokens=False,
+                # Transformers 5 uses area bounds under image size. Apply at
+                # every call so checkpoint defaults cannot inflate the budget.
+                images_kwargs={
+                    "size": {
+                        "shortest_edge": self.config.vlm_min_pixels,
+                        "longest_edge": self.config.vlm_max_pixels,
+                    },
+                },
             )
         )
         text_config = getattr(self.vlm.config, "text_config", self.vlm.config)
@@ -483,6 +499,9 @@ class TransformersBackend:
                 **inputs,
                 do_sample=False,
                 num_beams=1,
+                temperature=None,
+                top_p=None,
+                top_k=None,
                 max_new_tokens=self.config.caption_max_new_tokens,
             )
         self._synchronize()
@@ -502,6 +521,50 @@ class TransformersBackend:
             int(continuation.shape[1]),
         )
         return CaptionOutput(text, input_tokens, int(continuation.shape[1]))
+
+    def qa_instruction(self, question: str, options: tuple[str, ...]) -> str:
+        """One shared prompt for generation and conditional scoring."""
+        option_lines = "\n".join(
+            f"{index + 1}. {option}" for index, option in enumerate(options)
+        )
+        return (
+            f"{self.config.qa_prompt}\nQuestion: {question}\nOptions:\n"
+            f"{option_lines}\nAnswer with the full text of one option."
+        )
+
+    def generate_qa(
+        self, frames, timestamps, question, options, max_new_tokens=80
+    ):
+        """Diagnostic greedy generation with the exact scoring prompt."""
+        self._require_vlm()
+        if type(max_new_tokens) is not int or max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be a positive integer")
+        validate_observations(frames, timestamps)
+        prompt = self._prompt(
+            timestamps, self.qa_instruction(question, options)
+        )
+        inputs = self._vlm_inputs(prompt, self._images(frames))
+        prompt_ids = inputs["input_ids"][0].detach().cpu().tolist()
+        with self.torch.inference_mode():
+            ids = self.vlm.generate(
+                **inputs, do_sample=False, num_beams=1,
+                temperature=None, top_p=None, top_k=None,
+                max_new_tokens=max_new_tokens,
+            )
+        self._synchronize()
+        continuation = ids[:, len(prompt_ids):]
+        text = self.vlm_processor.batch_decode(
+            continuation, skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0].strip()
+        return {
+            "prompt": prompt, "prompt_token_ids": prompt_ids,
+            "text": text,
+            "generated_token_ids": continuation[0].detach().cpu().tolist(),
+            "max_new_tokens": max_new_tokens,
+            "output_token_limit_reached":
+            int(continuation.shape[1]) == max_new_tokens,
+        }
 
     def answer(
         self,
@@ -531,18 +594,19 @@ class TransformersBackend:
         if any(not option.strip() for option in options):
             raise ValueError("QA options must be nonempty")
         self._synchronize()
-        option_lines = "\n".join(
-            f"{index + 1}. {option}" for index, option in enumerate(options)
-        )
-        instruction = (
-            f"{self.config.qa_prompt}\nQuestion: {question}\nOptions:\n"
-            f"{option_lines}\nAnswer with the full text of one option."
-        )
+        instruction = self.qa_instruction(question, options)
         prompt = self._prompt(timestamps, instruction)
         images = self._images(frames)
         prompt_inputs = self._vlm_inputs(prompt, images)
         prompt_ids = prompt_inputs["input_ids"]
         prompt_length = int(prompt_ids.shape[1])
+        audit = getattr(self, "qa_audit_enabled", False)
+        if audit:
+            self.last_qa_audit = {
+                "prompt": prompt,
+                "prompt_token_ids": prompt_ids[0].detach().cpu().tolist(),
+                "options": [],
+            }
         self.last_processor_info["task"] = "qa_prompt"
         LOGGER.info(
             "QA start: n_frames=%d input_tokens=%d n_options=%d",
@@ -613,6 +677,27 @@ class TransformersBackend:
                     else token_log_likelihood.sum()
                 )
                 option_scores.append(float(score.item()))
+                if audit:
+                    self.last_qa_audit["options"].append({
+                        "text": option,
+                        "target_token_ids": target_ids.detach().cpu().tolist(),
+                        "target_positions": list(range(
+                            prompt_length, prompt_length + option_length
+                        )),
+                        "predictor_positions": list(range(
+                            prompt_length - 1,
+                            prompt_length + option_length - 1,
+                        )),
+                        "token_log_likelihoods": token_log_likelihood
+                        .detach().cpu().tolist(),
+                        "sum_log_likelihood": float(
+                            token_log_likelihood.sum().item()
+                        ),
+                        "mean_log_likelihood": float(
+                            token_log_likelihood.mean().item()
+                        ),
+                        "score": float(score.item()),
+                    })
         self._synchronize()
         scores = np.asarray(option_scores, dtype=float)
         assert scores.shape == (len(options),) and np.isfinite(scores).all()

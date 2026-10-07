@@ -1,7 +1,7 @@
-# Runtime used for actual Apple Silicon validation; Python 3.13 arm64.
+# Qwen 3.8 dependency proposal; not validated on Apple Silicon after migration.
 torch==2.9.1
 torchvision==0.24.1
-transformers==4.57.1
+transformers==5.17.0
 numpy==2.2.6
 Pillow==11.3.0
 opencv-python==4.12.0.88

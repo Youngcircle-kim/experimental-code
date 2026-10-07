@@ -10,3 +10,23 @@ data/
 outputs/
 build/
 dist/
+
+# Local tests and test reports
+/tests/
+.coverage
+.coverage.*
+htmlcov/
+
+# Generated output and temporary dependencies
+/output/
+/tmp/
+node_modules/
+
+# Local run configurations and one-off data preparation
+/configs/*.pinned.json
+/extract_dev_videos.py
+
+# Operating-system metadata and packaged project exports
+.DS_Store
+Thumbs.db
+/event-caption-pilot.zip

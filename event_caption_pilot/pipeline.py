@@ -1,4 +1,4 @@
-"""Pilot A diagnostics followed by fixed-boundary V/T/V+T evaluation."""
+"""Boundary diagnostics and paired eight-condition VQA ablations."""
 
 from __future__ import annotations
 
@@ -17,6 +17,12 @@ from uuid import uuid4
 
 import numpy as np
 
+from .ablation import (
+    COMPARISONS,
+    CONDITIONS,
+    HYPOTHESES,
+    select_frame_control,
+)
 from .algorithms import (
     ScoreCalibrator,
     allocate_frames,
@@ -36,7 +42,7 @@ from .reproducibility import fix_seed
 from .types import Backend, Event, Question, Video
 
 LOGGER = logging.getLogger(__name__)
-CONDITION_KEYS = ("control_v", "treatment_t", "treatment_vt")
+CONDITION_KEYS = CONDITIONS
 
 
 @dataclass
@@ -48,6 +54,8 @@ class PreparedVideo:
     visual_event_features: np.ndarray
     text_event_features: np.ndarray | None
     record: dict[str, Any]
+    frame_features: np.ndarray
+    matched: PreparedVideo | None = None
 
 
 def describe_events(
@@ -235,7 +243,55 @@ def prepare_video(
             ),
         },
     }
-    return PreparedVideo(video, events, visual_features, text_features, record)
+    prepared = PreparedVideo(
+        video, events, visual_features, text_features, record, features
+    )
+    if config.pilot == "both":
+        matched_events = segment(
+            features, config, "D0", segment_count=len(events)
+        )
+        matched_started = perf_counter()
+        matched_captions = [
+            event_caption(
+                video, event,
+                sample_indices(
+                    event.start, event.stop,
+                    min(config.caption_max_frames, event.stop - event.start),
+                ),
+                backend, config,
+            )
+            for event in matched_events
+        ]
+        matched_text = normalize_rows(
+            np.asarray(backend.encode_texts(
+                [item["text"] for item in matched_captions]
+            ), dtype=float), config.normalization_epsilon,
+        )
+        if matched_text.shape[0] != len(matched_events):
+            raise ValueError("Matched caption embedding count is invalid")
+        matched_record = {
+            "segmentation": describe_events(
+                video, matched_events, np.arange(len(features))
+            ),
+            "captions": matched_captions,
+            "preparation_seconds": perf_counter() - matched_started,
+            "current_generation_seconds": sum(
+                item["current_generation_seconds"]
+                for item in matched_captions
+            ),
+            "historical_cold_generation_seconds": sum(
+                item["generation_seconds"] for item in matched_captions
+            ),
+        }
+        record["matched_uniform_partition"] = matched_record
+        prepared.matched = PreparedVideo(
+            video, matched_events,
+            event_features(
+                features, matched_events, config.normalization_epsilon
+            ),
+            matched_text, matched_record, features,
+        )
+    return prepared
 
 
 def relevance_scores(
@@ -326,10 +382,26 @@ def evaluate_question(
         "treatment_vt": (1 - config.text_weight) * control_normalized
         + config.text_weight * treatment_normalized,
     }
-    relevance_seconds = perf_counter() - relevance_started
-    capacities = np.array(
-        [event.stop - event.start for event in prepared.events], dtype=int
+    if prepared.matched is None:
+        raise ValueError("QA requires a count-matched uniform partition")
+    matched_v, matched_t = relevance_scores(
+        prepared.matched, question, backend, config
     )
+    matched_v, matched_t = calibrator.transform(matched_v, matched_t)
+    scores["uniform_event_v"] = matched_v
+    scores["uniform_event_vt"] = (
+        (1 - config.text_weight) * matched_v + config.text_weight * matched_t
+    )
+    visual_query = np.asarray(
+        backend.encode_visual_question(question.text), dtype=float
+    )
+    visual_query = normalize_rows(
+        visual_query[None, :], config.normalization_epsilon
+    )[0]
+    frame_scores = prepared.frame_features @ visual_query
+    for name in ("uniform", "frame_top", "temporal_bin"):
+        scores[name] = frame_scores
+    relevance_seconds = perf_counter() - relevance_started
     question_seed = int.from_bytes(
         hashlib.sha256(
             f"{config.seed}:{prepared.video.video_id}:{question.question_id}".encode(),
@@ -345,18 +417,28 @@ def evaluate_question(
     condition_results: dict[str, Any] = {}
     for condition in condition_order:
         selection_started = perf_counter()
-        allocations = allocate_frames(
-            scores[condition],
-            capacities,
-            config.frame_budget,
-            config.allocation_temperature,
-        )
-        selected_indices = np.concatenate(
-            [
+        if condition in ("uniform", "frame_top", "temporal_bin"):
+            selected_indices = select_frame_control(
+                condition, frame_scores, config.frame_budget
+            )
+            allocations = np.array([config.frame_budget])
+            partition = "candidate_pool"
+        else:
+            use_matched = condition.startswith("uniform_event_")
+            events = (
+                prepared.matched.events if use_matched else prepared.events
+            )
+            partition = "matched_uniform" if use_matched else "detected"
+            allocations = allocate_frames(
+                scores[condition],
+                np.array([event.stop - event.start for event in events]),
+                config.frame_budget,
+                config.allocation_temperature,
+            )
+            selected_indices = np.concatenate([
                 sample_indices(event.start, event.stop, int(count))
-                for event, count in zip(prepared.events, allocations)
-            ]
-        )
+                for event, count in zip(events, allocations)
+            ])
         if (
             len(selected_indices) != config.frame_budget
             or len(np.unique(selected_indices)) != config.frame_budget
@@ -396,7 +478,9 @@ def evaluate_question(
         ):
             raise ValueError("QA returned invalid predicted_index")
         condition_results[condition] = {
-            "event_scores": scores[condition].tolist(),
+            "partition": partition,
+            "event_scores": scores[condition].tolist()
+            if partition != "candidate_pool" else None,
             "allocation": allocations.tolist(),
             "selected_indices": selected_indices.tolist(),
             "selected_timestamps": timestamps.tolist(),
@@ -420,6 +504,7 @@ def evaluate_question(
         ],
         "control_visual_raw_scores": control_visual_scores.tolist(),
         "treatment_text_raw_scores": treatment_text_scores.tolist(),
+        "frame_visual_raw_scores": frame_scores.tolist(),
         **{
             f"{key}_correct": condition_results[key]["correct"]
             for key in CONDITION_KEYS
@@ -456,6 +541,14 @@ def reproducible_result_digest(report: dict[str, Any]) -> str:
                 "fixed_segmentation": video["fixed_segmentation"],
                 "diagnostics": video["detector_comparisons"],
                 "captions": [item["text"] for item in video["captions"]],
+                "matched_partition": {
+                    "segmentation": video["matched_uniform_partition"][
+                        "segmentation"
+                    ],
+                    "captions": [item["text"] for item in video[
+                        "matched_uniform_partition"
+                    ]["captions"]],
+                } if "matched_uniform_partition" in video else None,
             }
             for video in report["videos"]
         ],
@@ -560,6 +653,12 @@ def run_experiment(config: Config) -> dict[str, Any]:
                 )
                 control_dev_scores.append(control_scores)
                 treatment_dev_scores.append(treatment_scores)
+                assert prepared.matched is not None
+                matched_v, matched_t = relevance_scores(
+                    prepared.matched, question, backend, config
+                )
+                control_dev_scores.append(matched_v)
+                treatment_dev_scores.append(matched_t)
         calibrator = ScoreCalibrator.fit(
             np.concatenate(control_dev_scores),
             np.concatenate(treatment_dev_scores),
@@ -578,7 +677,8 @@ def run_experiment(config: Config) -> dict[str, Any]:
             "fusion_text_weight": config.text_weight,
             "fit_rule": (
                 "global development-only z-score; equal event-question-pair "
-                "weight; no QA labels"
+                "weight across detected and count-matched uniform "
+                "partitions; no QA labels"
             ),
         }
         calibration_seconds = perf_counter() - calibration_started
@@ -592,11 +692,20 @@ def run_experiment(config: Config) -> dict[str, Any]:
                     )
     metric_started = perf_counter()
     metrics = (
-        clustered_comparison(rows, config)
+        clustered_comparison(rows, config, CONDITION_KEYS, COMPARISONS)
         if rows
         else {"status": "pilot_a_only_no_qa"}
     )
     if rows:
+        metrics["hypotheses"] = {
+            name: {
+                f"{treatment}_minus_{control}": metrics[
+                    "paired_comparisons"
+                ][f"{treatment}_minus_{control}"]
+                for treatment, control in pairs
+            }
+            for name, pairs in HYPOTHESES.items()
+        }
         metrics["vt_changes"] = {
             name: sum(row["vt_change"] == name for row in rows)
             for name in ("improved", "degraded", "unchanged")
@@ -666,7 +775,8 @@ def run_experiment(config: Config) -> dict[str, Any]:
         except metadata.PackageNotFoundError:
             continue
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "conditions": list(CONDITION_KEYS),
         "started_at_utc": started_at.isoformat(),
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "artifact_dir": str(output_path),

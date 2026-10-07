@@ -66,7 +66,7 @@ class Config:
     model_cache_dir: str = ".cache/huggingface"
     local_files_only: bool = False
     attention_implementation: str = "eager"
-    vlm_model: str = "Qwen/Qwen2.5-VL-3B-Instruct"
+    vlm_model: str = "Qwen/Qwen3.8-27B"
     vlm_revision: str = "main"
     device: str = "cpu"
     model_dtype: str = "float32"

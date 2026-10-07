@@ -520,7 +520,15 @@ def evidence_metrics(
 
 
 def clustered_comparison(
-    rows: list[dict[str, Any]], config: Config
+    rows: list[dict[str, Any]], config: Config,
+    arm_names: tuple[str, ...] = (
+        "control_v", "treatment_t", "treatment_vt"
+    ),
+    comparisons: tuple[tuple[str, str], ...] = (
+        ("treatment_t", "control_v"),
+        ("treatment_vt", "control_v"),
+        ("treatment_vt", "treatment_t"),
+    ),
 ) -> dict[str, Any]:
     """Compare paired QA arms using video-cluster percentile bootstrap CIs.
 
@@ -529,8 +537,10 @@ def clustered_comparison(
     differences remain question-weighted, including unequal video sizes.
 
     Args:
-        rows: Evaluation rows with IDs and three binary correctness fields.
+        rows: Evaluation rows with IDs and binary correctness per condition.
         config: Seed, bootstrap replicate count and confidence level.
+        arm_names: Ordered condition keys to evaluate.
+        comparisons: Ordered (treatment, control) pairs to report.
 
     Returns:
         Accuracies, paired differences and confidence intervals. Intervals are
@@ -539,7 +549,10 @@ def clustered_comparison(
     config.validate()
     if not rows:
         raise ValueError("At least one evaluation question is required")
-    arm_names = ("control_v", "treatment_t", "treatment_vt")
+    if not arm_names or len(set(arm_names)) != len(arm_names):
+        raise ValueError("Condition names must be unique and nonempty")
+    if any(a not in arm_names or b not in arm_names for a, b in comparisons):
+        raise ValueError("Comparisons must reference existing conditions")
     question_keys: set[tuple[str, str]] = set()
     clustered_rows: dict[str, list[list[int]]] = {}
     for row in rows:
@@ -616,7 +629,9 @@ def clustered_comparison(
         assert np.all(bootstrap_question_counts > 0)
     paired_comparisons: dict[str, dict[str, Any]] = {}
     tail_probability = (1.0 - config.confidence_level) / 2.0
-    for treatment_index, control_index in ((1, 0), (2, 0), (2, 1)):
+    for treatment, control in comparisons:
+        treatment_index = arm_names.index(treatment)
+        control_index = arm_names.index(control)
         comparison_name = (
             f"{arm_names[treatment_index]}_minus_{arm_names[control_index]}"
         )
