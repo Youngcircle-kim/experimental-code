@@ -1,4 +1,4 @@
-"""Independent, resumable 16/32-frame video QA experiment for one GPU."""
+"""Independent, resumable 16/32/64-frame video QA experiment for one GPU."""
 
 from __future__ import annotations
 
@@ -216,8 +216,8 @@ def load_inputs(args):
             "length-normalized scoring and 5000 bootstrap samples. "
             "Use prepare_models with configs/real.a4500.json first."
         )
-    if args.frame_budget not in (16, 32):
-        raise ValueError("frame-budget must be 16 or 32")
+    if args.frame_budget not in (16, 32, 64):
+        raise ValueError("frame-budget must be 16, 32 or 64")
     if args.split == "eval" and (
         args.max_videos is not None or args.max_questions is not None
     ):
@@ -872,7 +872,7 @@ def main():
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
-        "--frame-budget", type=int, choices=(16, 32), required=True
+        "--frame-budget", type=int, choices=(16, 32, 64), required=True
     )
     parser.add_argument("--split", choices=("dev", "eval"), default="dev")
     parser.add_argument(

@@ -210,6 +210,60 @@ runtime 검증 때문에 GPU 배치와 환경을 그대로 유지한다. 명령�
 이 실행기는 같은 프레임을 고른 조건도 각각 평가한다. 소요 시간은 smoke의
 실제 로그로 판단하며 GPU 두 장으로 정확히 두 배 빨라진다고 가정하지 않는다.
 
+## 64프레임 추가 dev 실험
+
+`portable_budget`는 16·32·64프레임을 지원한다. `a4500_suite`의 두 GPU
+실행은 기존 16/32 조합이므로, B64는 아래 단일 GPU 명령으로 실행한다.
+목적은 동일한 다섯 선택 방법에서 입력 장수를 늘렸을 때 정확도와 QA 비용이
+어떻게 달라지는지 확인하는 것이다. 모델·revision·BF16·SDPA·QA 해상도
+320×320·dev long 표본을 그대로 유지한다. B64는 시각 토큰 6,400개이며,
+20GB 카드에서의 실제 최대 메모리는 smoke로 확인한다. 한 영상 성공이 전체
+문항의 메모리를 보장하지는 않는다.
+
+업데이트된 코드의 `--help`에 `--frame-budget {16,32,64}`가 표시되는지
+확인하고, 서버의 기존 pinned 설정과 manifest를 재사용한다. 저장소 루트의
+tmux 세션에서 GPU 0을 사용하는 예시는 다음과 같다.
+
+```bash
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES=0
+export PYTHONHASHSEED=42
+export OMP_NUM_THREADS=4
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+mkdir -p outputs/a4500_b64
+set -o pipefail
+
+# 첫 영상·첫 문항, 5개 방법 × 6개 선택지 순서
+./.venv/bin/python -u -m event_caption_pilot.portable_budget \
+  --config configs/real.a4500.pinned.json \
+  --manifest data/videomme_a4500/manifest.json \
+  --output-dir outputs/a4500_b64/smoke_b64 \
+  --frame-budget 64 --split dev --duration long \
+  --max-videos 1 --max-questions 1 \
+  2>&1 | tee -a outputs/a4500_b64/smoke_b64.log
+```
+
+smoke가 `status: complete`로 끝난 뒤, 같은 터미널에서 전체 dev long을 실행한다.
+
+```bash
+./.venv/bin/python -u -m event_caption_pilot.portable_budget \
+  --config configs/real.a4500.pinned.json \
+  --manifest data/videomme_a4500/manifest.json \
+  --output-dir outputs/a4500_b64/dev_b64 \
+  --frame-budget 64 --split dev --duration long \
+  2>&1 | tee -a outputs/a4500_b64/dev_b64.log
+```
+
+`outputs/a4500_b64/dev_b64/handoff.json`에서 방법별 정확도, D와 기준선의
+차이·신뢰구간, QA 시간과 GPU 메모리를 확인한다. 문항별 비교에는
+`question_metrics.csv`, 실행 조건 확인에는 `protocol.json`, `runtime.json`,
+`backend.json`을 함께 보관한다. `compare_budgets`는 여전히 B16/B32 전용이다.
+기존 B16/B32 결과는 보존하며 새 코드로 같은 출력 폴더에 재개하지 않는다.
+소스 해시가 달라졌으므로 기존 결과와의 정식 예산 비교에는 변경 범위 검증이나
+동일 코드로 기준 예산을 다시 실행하는 작업이 필요하다. 새 예산에서 각 방법은
+프레임을 다시 선택하므로 B64가 기존 B32 프레임을 전부 포함한다고 가정하지 않는다.
+OOM이 나면 먼저 해당 로그를 확인하며, 실패 문항만 해상도를 낮춰 결과에 섞지 않는다.
+
 ## 5. 고정한 설정으로 eval 평가
 
 dev 결과를 확인한 뒤 설정을 확정하고 eval 결과를 보기 전에 고정한다.
