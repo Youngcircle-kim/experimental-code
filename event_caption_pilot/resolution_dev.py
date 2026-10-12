@@ -21,6 +21,7 @@ from .order_experiments import seed_call
 from .paired_reanalysis import clustered_means
 from .qa_diagnostics import report_digest
 from .types import Video
+from .video_sampling import check_decoded_native_count, plan_native_candidates
 
 
 def load_inputs(args):
@@ -211,17 +212,37 @@ def decode_selected(path, config, count, indices, side, expected_hash):
     times, pixels, low, raw_sizes = [], {}, {}, {}
     wanted = set(indices)
     frame_index, next_observation = 0, 0.0
+    native_indices, sampling = None, None
     started = perf_counter()
     try:
         fps = float(cap.get(cv2.CAP_PROP_FPS))
-        if not np.isfinite(fps) or fps <= 0:
+        if getattr(config, "min_candidate_frames", 0) > 0:
+            planned, sampling = plan_native_candidates(
+                config, fps, cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            )
+            native_indices = set(planned)
+            if len(planned) != count:
+                raise ValueError(
+                    "Original candidate count changed: "
+                    f"observed_candidates={len(planned)}, expected={count}, "
+                    f"source_fps={fps}, "
+                    "declared_native_frames="
+                    f"{sampling['native_frame_count']}, "
+                    f"required_minimum={config.min_candidate_frames}"
+                )
+        elif not np.isfinite(fps) or fps <= 0:
             raise ValueError("Invalid source FPS")
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
             stamp = frame_index / fps
-            if stamp >= next_observation:
+            selected = (
+                frame_index in native_indices
+                if native_indices is not None
+                else stamp >= next_observation
+            )
+            if selected:
                 index = len(times)
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 small = cv2.resize(
@@ -233,13 +254,23 @@ def decode_selected(path, config, count, indices, side, expected_hash):
                     pixels[index] = cv2.resize(rgb, (side, side))
                     raw_sizes[index] = [int(rgb.shape[1]), int(rgb.shape[0])]
                 times.append(stamp)
-                next_observation += 1.0 / min(config.candidate_fps, fps)
+                if native_indices is None:
+                    next_observation += 1.0 / min(config.candidate_fps, fps)
                 if (
                     len(times) > count
                     or len(times) > config.max_candidate_frames
                 ):
                     raise ValueError("Original candidate count changed")
             frame_index += 1
+        if sampling is not None:
+            check_decoded_native_count(
+                config,
+                fps,
+                sampling["native_frame_count"],
+                frame_index,
+                len(times),
+            )
+            sampling["decoded_native_frame_count"] = frame_index
     finally:
         cap.release()
     timestamps = np.asarray(times, dtype=float)
@@ -251,21 +282,24 @@ def decode_selected(path, config, count, indices, side, expected_hash):
         )
     if set(pixels) != wanted:
         raise ValueError("Some selected frames were not decoded")
+    info = {
+        "candidate_sha256": digest.hexdigest(),
+        "candidate_count": count,
+        "source_fps": fps,
+        "decode_seconds": perf_counter() - started,
+        "original_selected_sizes": raw_sizes,
+        "selected_native_smaller_than_target": sum(
+            min(size) < side for size in raw_sizes.values()
+        ),
+    }
+    if sampling is not None:
+        info["candidate_sampling"] = sampling
     return (
         low,
         pixels,
         timestamps,
         frame_index / fps,
-        {
-            "candidate_sha256": digest.hexdigest(),
-            "candidate_count": count,
-            "source_fps": fps,
-            "decode_seconds": perf_counter() - started,
-            "original_selected_sizes": raw_sizes,
-            "selected_native_smaller_than_target": sum(
-                min(size) < side for size in raw_sizes.values()
-            ),
-        },
+        info,
     )
 
 

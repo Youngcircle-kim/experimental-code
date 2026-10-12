@@ -12,6 +12,7 @@ import numpy as np
 
 from .config import Config
 from .types import Question, Video
+from .video_sampling import check_decoded_native_count, plan_native_candidates
 
 
 def array_digest(*arrays: np.ndarray) -> str:
@@ -183,7 +184,13 @@ def decode_video(
     timestamps: list[float] = []
     try:
         fps = float(capture.get(cv2.CAP_PROP_FPS))
-        if not np.isfinite(fps) or fps <= 0:
+        native_indices, sampling = None, None
+        if getattr(config, "min_candidate_frames", 0) > 0:
+            planned, sampling = plan_native_candidates(
+                config, fps, capture.get(cv2.CAP_PROP_FRAME_COUNT)
+            )
+            native_indices = set(planned)
+        elif not np.isfinite(fps) or fps <= 0:
             raise ValueError(
                 "Invalid video FPS; supply an NPZ with verified timestamps"
             )
@@ -193,19 +200,33 @@ def decode_video(
             if not ok:
                 break
             timestamp = frame_index / fps
-            if timestamp >= next_observation:
+            selected = (
+                frame_index in native_indices
+                if native_indices is not None
+                else timestamp >= next_observation
+            )
+            if selected:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 rgb = cv2.resize(
                     rgb, (config.frame_width, config.frame_height)
                 )
                 frames.append(rgb)
                 timestamps.append(timestamp)
-                next_observation += 1.0 / min(config.candidate_fps, fps)
+                if native_indices is None:
+                    next_observation += 1.0 / min(config.candidate_fps, fps)
                 if len(frames) > config.max_candidate_frames:
                     raise ValueError(
                         "Video exceeds candidate limit; reduce candidate_fps"
                     )
             frame_index += 1
+        if sampling is not None:
+            check_decoded_native_count(
+                config,
+                fps,
+                sampling["native_frame_count"],
+                frame_index,
+                len(frames),
+            )
         if not frames:
             raise ValueError("No decodable frames")
         result = np.stack(frames)

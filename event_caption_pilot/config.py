@@ -57,6 +57,7 @@ class Config:
     bootstrap_samples: int = 2000
     confidence_level: float = 0.95
     candidate_fps: float = 2.0
+    min_candidate_frames: int = 0
     max_candidate_frames: int = 4096
     frame_height: int = 224
     frame_width: int = 224
@@ -140,6 +141,11 @@ class Config:
                 or value <= 0
             ):
                 raise ValueError(f"{name} must be finite and positive")
+        if not 0 <= self.min_candidate_frames <= self.max_candidate_frames:
+            raise ValueError(
+                "min_candidate_frames must be between 0 and "
+                "max_candidate_frames"
+            )
         if not 0 <= self.seed < 2**32:
             raise ValueError("seed must be in [0, 2**32)")
         if not 0 <= self.text_weight <= 1:

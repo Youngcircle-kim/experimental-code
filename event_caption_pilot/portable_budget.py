@@ -380,6 +380,20 @@ def make_selection(features, query, timestamps, partitions, config):
 def summarize_rows(rows, seed=42):
     if not rows:
         raise ValueError("No completed questions")
+    sampling = {}
+    for row in rows:
+        audit = row.get("decode_info", {}).get("candidate_sampling")
+        if audit is None:
+            continue
+        vid = row["video_id"]
+        if vid in sampling and sampling[vid] != audit:
+            raise ValueError("Candidate sampling audit differs within video")
+        sampling[vid] = audit
+    if sampling and any(
+        not row.get("decode_info", {}).get("candidate_sampling")
+        for row in rows
+    ):
+        raise ValueError("Incomplete candidate sampling audits")
     means = []
     for row in rows:
         if set(row["conditions"]) != set(CONDITIONS):
@@ -449,6 +463,21 @@ def summarize_rows(rows, seed=42):
         ]
     )
     return {
+        **({
+            "candidate_sampling": {
+                "n_videos": len(sampling),
+                "densified_video_ids": sorted(
+                    vid for vid, audit in sampling.items()
+                    if audit["densified"]
+                ),
+                "videos": dict(sorted(sampling.items())),
+                "interpretation": (
+                    "Budgets share the same candidate pool. When the "
+                    "candidate count equals the frame budget, all selection "
+                    "methods use every candidate; ties are structural."
+                ),
+            },
+        } if sampling else {}),
         "primary_comparison": "D_minus_uniform",
         "overall": clustered_means(means, keys, seed=seed, samples=5000),
         "by_duration": {

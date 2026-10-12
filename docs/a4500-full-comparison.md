@@ -8,7 +8,8 @@
 학습 없이 동일한 pinned CLIP + Qwen3.5-4B로 프레임 예산 16·32·64와
 `uniform`, `frame_top`, `temporal_bin`, `C`, `D`의 다섯 선택 방법을 비교한다.
 각 문항은 동일한 여섯 선택지 순서로 평가한다. 모델·QA 해상도 320×320·BF16·SDPA,
-후보 2FPS·224×224는 기존 설정을 유지한다.
+후보는 기본 2FPS·224×224다. 전체 길이를 포함하는 이번 실행은 아래의 별도 설정으로
+**최소 후보 64개**를 모든 예산에 공통 적용한다.
 
 ## 두 GPU의 분담
 
@@ -40,6 +41,43 @@ GPU별 대기열에서 B64, B32, B16 순으로 처리하며, 한 GPU가 먼저 �
 ```
 
 모든 MP4가 이미 있다면 추출을 생략한다. 빠진 영상을 자동으로 제외하지 않는다.
+
+### 짧은 영상도 포함하는 공통 후보 설정
+
+2FPS로 추출한 후보가 64개 미만이면 B64 실행이 실패한다. 원본에 서로 다른 프레임이
+64개 이상 있는 영상은 `min_candidate_frames: 64`로 기존 후보를 유지하면서 실제
+원본 프레임을 보충할 수 있다. 원본 전체에 균등한 64지점 격자를 만들고, 기존 후보와
+겹치지 않는 지점에서 필요한 수만큼 균등한 순위로 선택한다. 보충은 픽셀 내용이나
+정답을 사용하지 않는다. B16·B32·B64 모두 같은 후보 풀을 사용한다.
+이미 64개 이상인 영상은 기존 후보의 인덱스·시간·픽셀을 그대로 유지한다.
+
+기존 pinned 설정을 보존하고 새 설정을 만든다. 다음 블록 전체를 서버에서 실행한다.
+
+```bash
+./.venv/bin/python - <<'PY'
+import json
+from pathlib import Path
+from event_caption_pilot.config import Config
+
+source = Path('configs/real.a4500.pinned.json')
+target = Path('configs/real.a4500.full.pinned.json')
+settings = json.loads(source.read_text(encoding='utf-8-sig'))
+settings['min_candidate_frames'] = 64
+Config(**settings).validate()
+if target.exists():
+    assert json.loads(target.read_text(encoding='utf-8-sig')) == settings, 'Existing target differs; inspect it first'
+else:
+    target.write_text(json.dumps(settings, indent=2) + '\n', encoding='utf-8')
+print(target)
+PY
+```
+
+중복 프레임이나 보간으로 채우지 않는다. 원본 프레임 자체가 64개 미만이거나,
+파일의 선언 프레임 수와 실제 디코딩 수가 다르거나 FPS/프레임 수 메타데이터가
+유효하지 않으면 오류로 중단한다. 후자의 경우 영상 파일과 메타데이터부터 확인한다.
+`min_candidate_frames` 기본값 0은 기존 2FPS 동작을 유지한다. 새로운 설정과 코드로
+기존 결과를 재개하거나 섞을 수 없으므로 아래의 새 출력 루트를 사용한다.
+
 아래 검사는 모델이나 GPU를 사용하지 않고 모든 요청 파일의 SHA256을 계산한 뒤,
 실제 디코딩으로 B64에 필요한 고유 후보 64개 이상과 시간 순서 등을 확인한다.
 영상 전체를 읽으므로 파일 수와 영상 길이에 따라 시간이 걸린다.
@@ -47,7 +85,7 @@ GPU별 대기열에서 B64, B32, B16 순으로 처리하며, 한 GPU가 먼저 �
 ```bash
 unset CUDA_VISIBLE_DEVICES
 ./.venv/bin/python -m event_caption_pilot.a4500_full_suite check \
-  --config configs/real.a4500.pinned.json \
+  --config configs/real.a4500.full.pinned.json \
   --manifest data/videomme_a4500/manifest.json \
   --decode-check
 ```
@@ -59,7 +97,9 @@ unset CUDA_VISIBLE_DEVICES
 실제 GPU 작업 명령과 분할표만 보려면 다음을 사용한다. 출력 폴더를 만들지 않는다.
 
 ```bash
-./.venv/bin/python -m event_caption_pilot.a4500_full_suite run --dry-run
+./.venv/bin/python -m event_caption_pilot.a4500_full_suite run \
+  --config configs/real.a4500.full.pinned.json \
+  --output-root outputs/a4500_full_min64 --dry-run
 ```
 
 ## 2. 두 GPU 전체 실행
@@ -73,9 +113,9 @@ tmux new -s a4500-full
 ```bash
 unset CUDA_VISIBLE_DEVICES
 ./.venv/bin/python -u -m event_caption_pilot.a4500_full_suite run \
-  --config configs/real.a4500.pinned.json \
+  --config configs/real.a4500.full.pinned.json \
   --manifest data/videomme_a4500/manifest.json \
-  --output-root outputs/a4500_full \
+  --output-root outputs/a4500_full_min64 \
   --gpu-ids 0 1 \
   --budgets 16 32 64 \
   --splits dev eval \
@@ -86,8 +126,8 @@ Ctrl+B 다음 D로 분리하고 `tmux attach -t a4500-full`로 돌아온다.
 다른 SSH 창에서 처음 실행 중인 두 작업과 GPU 상태를 확인할 수 있다.
 
 ```bash
-tail -f outputs/a4500_full/logs/dev_b64_s0.log \
-        outputs/a4500_full/logs/dev_b64_s1.log
+tail -f outputs/a4500_full_min64/logs/dev_b64_s0.log \
+        outputs/a4500_full_min64/logs/dev_b64_s1.log
 # 별도 창
 watch -n 2 nvidia-smi
 ```
@@ -109,20 +149,20 @@ runtime을 검증하고 자동으로 집계한다. 한 문항이라도 누락되
 
 | 파일 | 내용 |
 |---|---|
-| `outputs/a4500_full/comparison.json` | dev/eval별 전체·길이별 정확도와 모든 예산 쌍 비교, QA 비용 |
-| `outputs/a4500_full/comparison.csv` | 표로 보기 쉬운 방법별 정확도·95% 신뢰구간 |
-| `outputs/a4500_full/question_metrics.csv` | 문항별·예산별·방법별 순서 평균 |
-| `outputs/a4500_full/suite_plan.json` | 전체 대상·분할·입력 및 코드 해시·고정 GPU 배치 |
-| `outputs/a4500_full/suite_status.json` | 전체 완료/실패 상태 |
-| `outputs/a4500_full/reports/dev/b64/handoff.json` | dev B64의 합산 결과; 다른 split·예산도 동일 구조 |
-| `outputs/a4500_full/reports/eval/comparison_b32_b64.json` | eval의 B32↔B64 짝 비교; 16↔32, 16↔64도 생성 |
-| `outputs/a4500_full/jobs/` | GPU 분할별 원본 프로토콜·추론 결과·재개용 체크포인트 |
+| `outputs/a4500_full_min64/comparison.json` | dev/eval별 전체·길이별 정확도와 모든 예산 쌍 비교, QA 비용, 후보 보충 기록 |
+| `outputs/a4500_full_min64/comparison.csv` | 표로 보기 쉬운 방법별 정확도·95% 신뢰구간 |
+| `outputs/a4500_full_min64/question_metrics.csv` | 문항별·예산별·방법별 순서 평균 |
+| `outputs/a4500_full_min64/suite_plan.json` | 전체 대상·분할·입력 및 코드 해시·고정 GPU 배치 |
+| `outputs/a4500_full_min64/suite_status.json` | 전체 완료/실패 상태 |
+| `outputs/a4500_full_min64/reports/dev/b64/handoff.json` | dev B64의 합산 결과; 다른 split·예산도 동일 구조 |
+| `outputs/a4500_full_min64/reports/eval/comparison_b32_b64.json` | eval의 B32↔B64 짝 비교; 16↔32, 16↔64도 생성 |
+| `outputs/a4500_full_min64/jobs/` | GPU 분할별 원본 프로토콜·추론 결과·재개용 체크포인트 |
 
 이미 완료된 저장 결과를 GPU 없이 다시 집계할 때:
 
 ```bash
 ./.venv/bin/python -m event_caption_pilot.a4500_full_suite summarize \
-  --output-root outputs/a4500_full
+  --output-root outputs/a4500_full_min64
 ```
 
 이 명령은 저장된 suite plan과 모든 원본 결과·체크포인트를 읽는다. 원본 영상이나
@@ -136,6 +176,13 @@ dev와 eval 점수는 섞지 않는다. dev는 이미 설정 선택에 사용됐
 short·medium·long을 따로 보고한다. 신뢰구간은 다중 비교 보정 전 개별 구간이다.
 이 실행은 여섯 선택지 순서를 평균하는 사용자 정의 평가이므로 공식 benchmark
 점수와 동일하다고 주장하지 않는다.
+
+후보를 정확히 64개로 보충한 영상에서 B64는 다섯 방법 모두 모든 후보를 선택한다.
+따라서 이 영상의 방법 간 동점은 선택 여지가 없는 설계의 결과다. 합산 보고서의
+`candidate_sampling.densified_video_ids`에서 보충 대상 ID를 확인할 수 있고,
+`candidate_sampling.videos`에는 원본·기본 후보·최종 후보 수와 보충 정책이 남는다.
+문항별 원본 결과에는 `decode_info.candidate_sampling`으로 같은 정보를 기록한다.
+기존 2FPS 실험과 새 공통 최소 후보 실험은 별도 실험으로 해석한다.
 
 현재 540문항 기준 **540 × 3예산 × 5방법 × 6순서 = 48,600 QA 호출**이다.
 각 QA에는 선택지별 forward가 포함된다. 앞서 측정한 시간 중앙값을 단순 적용하면

@@ -83,6 +83,12 @@ def build_plan(args):
             num_shards=1, shard_index=0,
         )
         _, videos, protocol = runner.load_inputs(inputs)
+        minimum = protocol["config"]["min_candidate_frames"]
+        if 0 < minimum < max(args.budgets):
+            raise ValueError(
+                "For a shared candidate floor, min_candidate_frames must "
+                f"cover the largest requested budget ({max(args.budgets)})"
+            )
         for vid, identity in protocol["inputs"].items():
             digest = identity["sha256"]
             if digest in seen_content:
