@@ -4,6 +4,10 @@
 새 실행기는 과거 실험의 `outputs/`를 요구하지 않는다. Git으로 받는 코드 외에
 실제 MP4 영상과 모델 가중치를 별도로 준비해야 한다.
 
+manifest의 **전체 문항을 16·32·64프레임으로 두 GPU에 나눠 비교**하려면
+[전체 비교 안내](a4500-full-comparison.md)를 사용한다. 아래의 기존
+`a4500_suite`는 두 GPU에서 B16과 B32를 각각 실행하는 경로다.
+
 ## 무엇을 확인하는가
 
 학습이나 fine-tuning 없이 frozen CLIP과 Qwen3.5-4B로 긴 영상의 객관식
@@ -257,7 +261,9 @@ smoke가 `status: complete`로 끝난 뒤, 같은 터미널에서 전체 dev lon
 `outputs/a4500_b64/dev_b64/handoff.json`에서 방법별 정확도, D와 기준선의
 차이·신뢰구간, QA 시간과 GPU 메모리를 확인한다. 문항별 비교에는
 `question_metrics.csv`, 실행 조건 확인에는 `protocol.json`, `runtime.json`,
-`backend.json`을 함께 보관한다. `compare_budgets`는 여전히 B16/B32 전용이다.
+`backend.json`을 함께 보관한다. 업데이트된 `compare_budgets`는 저장된 예산을
+읽어 16↔32, 16↔64, 32↔64의 증가 방향 비교를 지원한다. 양쪽 결과는 같은 코드와
+실행 조건으로 생성되어야 하며, 분할 실행의 합산은 `a4500_full_suite`에서 수행한다.
 기존 B16/B32 결과는 보존하며 새 코드로 같은 출력 폴더에 재개하지 않는다.
 소스 해시가 달라졌으므로 기존 결과와의 정식 예산 비교에는 변경 범위 검증이나
 동일 코드로 기준 예산을 다시 실행하는 작업이 필요하다. 새 예산에서 각 방법은

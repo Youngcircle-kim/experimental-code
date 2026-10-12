@@ -218,6 +218,24 @@ def load_inputs(args):
         )
     if args.frame_budget not in (16, 32, 64):
         raise ValueError("frame-budget must be 16, 32 or 64")
+    num_shards = getattr(args, "num_shards", 1)
+    shard_index = getattr(args, "shard_index", 0)
+    if (
+        type(num_shards) is not int
+        or num_shards < 1
+        or type(shard_index) is not int
+        or not 0 <= shard_index < num_shards
+    ):
+        raise ValueError(
+            "num-shards must be a positive integer and shard-index an "
+            "integer in [0, num-shards)"
+        )
+    if num_shards > 1 and (
+        args.max_videos is not None or args.max_questions is not None
+    ):
+        raise ValueError(
+            "Video sharding cannot be combined with subset limits"
+        )
     if args.split == "eval" and (
         args.max_videos is not None or args.max_questions is not None
     ):
@@ -277,6 +295,21 @@ def load_inputs(args):
     ][: args.max_videos]
     if not chosen:
         raise ValueError("No videos match the requested split/duration")
+    sharding = None
+    if num_shards > 1:
+        sharding = {
+            "index": shard_index,
+            "count": num_shards,
+            "strategy": "sorted_video_id_round_robin",
+            "cohort": {
+                v["video_id"]: [str(q["question_id"]) for q in v["questions"]]
+                for v in chosen
+            },
+        }
+        assigned = set(sorted(sharding["cohort"])[shard_index::num_shards])
+        chosen = [v for v in chosen if v["video_id"] in assigned]
+        if not chosen:
+            raise ValueError("Requested video shard is empty")
     inputs = {
         v["video_id"]: file_identity(manifest_path.parent / v["path"])
         for v in chosen
@@ -314,6 +347,8 @@ def load_inputs(args):
             for p in sorted(Path(__file__).parent.glob("*.py"))
         },
     }
+    if sharding is not None:
+        protocol["sharding"] = sharding
     # Normalize tuples now so resumed JSON compares without type differences.
     protocol = json.loads(json.dumps(protocol, allow_nan=False))
     return config, chosen, protocol
@@ -519,6 +554,19 @@ def run(args):
     config, chosen, protocol = load_inputs(args)
     total = sum(len(v["questions"]) for v in chosen)
     digest = report_digest(protocol)
+    expected_digest = getattr(args, "expected_protocol_sha256", None)
+    if expected_digest is not None:
+        if not isinstance(expected_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected_digest
+        ):
+            raise ValueError(
+                "expected-protocol-sha256 must be 64 lowercase hex characters"
+            )
+        if expected_digest != digest:
+            raise ValueError(
+                "Protocol does not match expected-protocol-sha256; "
+                "input, configuration, or code changed after planning"
+            )
     if args.check_inputs:
         status = {
             "status": "inputs_validated_no_inference",
@@ -533,6 +581,13 @@ def run(args):
             ),
             "protocol_sha256": digest,
         }
+        if "sharding" in protocol:
+            status.update(
+                {
+                    "num_shards": protocol["sharding"]["count"],
+                    "shard_index": protocol["sharding"]["index"],
+                }
+            )
         print(json.dumps(status))
         return status
     output = args.output_dir.resolve()
@@ -882,6 +937,12 @@ def main():
     )
     parser.add_argument("--max-videos", type=int)
     parser.add_argument("--max-questions", type=int)
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument(
+        "--expected-protocol-sha256",
+        help="Require this frozen protocol digest before output or inference",
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--check-inputs", action="store_true")
     modes.add_argument("--summarize-only", action="store_true")

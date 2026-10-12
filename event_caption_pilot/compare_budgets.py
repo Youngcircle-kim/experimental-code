@@ -1,4 +1,4 @@
-"""Compare complete matched B16/B32 runs with paired video uncertainty."""
+"""Compare matched 16/32/64-frame runs with paired video uncertainty."""
 
 import argparse
 import json
@@ -18,6 +18,7 @@ from .resolution_dev import validate_processor
 from .types import Question
 
 ARMS = ("uniform", "frame_top", "temporal_bin", "C", "D")
+FRAME_BUDGETS = (16, 32, 64)
 CONFIG_BOOKKEEPING = {"frame_budget", "output_dir", "cache_dir", "device"}
 
 
@@ -77,7 +78,15 @@ def validate_backend(backend, config):
         raise ValueError("Backend software versions are missing")
 
 
-def load_complete(directory, budget):
+def _frame_budget(protocol):
+    budget = protocol["config"]["frame_budget"]
+    if type(budget) is not int or budget not in FRAME_BUDGETS:
+        raise ValueError("Require a frame budget of 16, 32 or 64")
+    return budget
+
+
+def load_complete(directory, budget=None):
+    """Verify a complete run, optionally requiring an expected frame budget."""
     directory = Path(directory).resolve()
     protocol, results = (
         read(directory / "protocol.json"),
@@ -93,12 +102,19 @@ def load_complete(directory, budget):
         or protocol.get("conditions") != list(ARMS)
         or protocol.get("split") not in {"dev", "eval"}
     ):
-        raise ValueError("Require complete portable B16/B32 QA320 results")
+        raise ValueError("Require complete portable B16/B32/B64 QA320 results")
     config = Config(**protocol["config"])
     config.validate()
+    saved_budget = _frame_budget(protocol)
+    if budget is not None and (
+        type(budget) is not int or saved_budget != budget
+    ):
+        raise ValueError(
+            f"Expected frame budget {budget}, found {saved_budget}"
+        )
+    budget = saved_budget
     if (
-        config.frame_budget != budget
-        or (config.frame_height, config.frame_width) != (224, 224)
+        (config.frame_height, config.frame_width) != (224, 224)
         or config.vlm_max_pixels != 320**2
         or config.mode != "real"
         or config.backend != "transformers"
@@ -226,7 +242,22 @@ def load_complete(directory, budget):
 
 
 def compare(baseline, larger):
-    left, right = load_complete(baseline, 16), load_complete(larger, 32)
+    return compare_loaded(load_complete(baseline), load_complete(larger))
+
+
+def compare_loaded(left, right):
+    """Compare already verified run structures without reading their files.
+
+    Inputs have the same shape as load_complete's return value. Callers that
+    merge verified shards must preserve their provenance and validation.
+    """
+    baseline_budget = _frame_budget(left["protocol"])
+    larger_budget = _frame_budget(right["protocol"])
+    if baseline_budget >= larger_budget:
+        raise ValueError(
+            "Require increasing baseline and larger frame budgets"
+        )
+    contrast = f"{larger_budget}_minus_{baseline_budget}"
     for description, first, second in (
         (
             "protocol",
@@ -245,7 +276,10 @@ def compare(baseline, larger):
         ),
     ):
         if first != second:
-            raise ValueError(f"Matched B16/B32 {description} differs")
+            raise ValueError(
+                f"Matched B{baseline_budget}/B{larger_budget} "
+                f"{description} differs"
+            )
     if set(left["rows"]) != set(right["rows"]):
         raise ValueError("Question sets differ across budgets")
     metrics = []
@@ -285,28 +319,28 @@ def compare(baseline, larger):
             numerators[arm] = nb - na
             row.update(
                 {
-                    f"{arm}_B16_correct_orders": na,
-                    f"{arm}_B32_correct_orders": nb,
-                    f"{arm}_B16": na / count,
-                    f"{arm}_B32": nb / count,
-                    f"{arm}_32_minus_16_numerator": nb - na,
-                    f"{arm}_32_minus_16": (nb - na) / count,
+                    f"{arm}_B{baseline_budget}_correct_orders": na,
+                    f"{arm}_B{larger_budget}_correct_orders": nb,
+                    f"{arm}_B{baseline_budget}": na / count,
+                    f"{arm}_B{larger_budget}": nb / count,
+                    f"{arm}_{contrast}_numerator": nb - na,
+                    f"{arm}_{contrast}": (nb - na) / count,
                 }
             )
         numerator = numerators["D"] - numerators["uniform"]
-        row["D_advantage_32_minus_16_numerator"] = numerator
-        row["D_advantage_32_minus_16"] = numerator / count
+        row[f"D_advantage_{contrast}_numerator"] = numerator
+        row[f"D_advantage_{contrast}"] = numerator / count
         row["n_option_orders"] = count
         metrics.append(row)
     keys = [
         name
         for arm in ARMS
         for name in (
-            f"{arm}_B16",
-            f"{arm}_B32",
-            f"{arm}_32_minus_16",
+            f"{arm}_B{baseline_budget}",
+            f"{arm}_B{larger_budget}",
+            f"{arm}_{contrast}",
         )
-    ] + ["D_advantage_32_minus_16"]
+    ] + [f"D_advantage_{contrast}"]
     seed = left["protocol"]["config"]["seed"]
     split = left["protocol"]["split"]
     interpretation = (
@@ -317,17 +351,19 @@ def compare(baseline, larger):
         "if methods were frozen before evaluation. "
     )
     return {
-        "experiment": "paired_frame_budget_16_vs_32",
+        "experiment": (
+            f"paired_frame_budget_{baseline_budget}_vs_{larger_budget}"
+        ),
         "version": 1,
         "baseline": {
             "directory": str(left["directory"]),
-            "frame_budget": 16,
+            "frame_budget": baseline_budget,
             "protocol_sha256": report_digest(left["protocol"]),
             "results_sha256": report_digest(left["results"]),
         },
         "larger": {
             "directory": str(right["directory"]),
-            "frame_budget": 32,
+            "frame_budget": larger_budget,
             "protocol_sha256": report_digest(right["protocol"]),
             "results_sha256": report_digest(right["results"]),
         },
@@ -335,8 +371,14 @@ def compare(baseline, larger):
         "qa_side": 320,
         "conditions": list(ARMS),
         "metric_definitions": {
-            "arm_32_minus_16": "Within-question B32 minus B16 accuracy",
-            "D_advantage_32_minus_16": "(D32 - uniform32) - (D16 - uniform16)",
+            f"arm_{contrast}": (
+                f"Within-question B{larger_budget} minus "
+                f"B{baseline_budget} accuracy"
+            ),
+            f"D_advantage_{contrast}": (
+                f"(D{larger_budget} - uniform{larger_budget}) - "
+                f"(D{baseline_budget} - uniform{baseline_budget})"
+            ),
         },
         "overall": clustered_means(metrics, keys, seed, samples=5000),
         "by_duration": {
