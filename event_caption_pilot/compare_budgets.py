@@ -10,6 +10,7 @@ import numpy as np
 
 from .cache import write_json
 from .config import Config
+from .encoders import A4500_ENCODERS
 from .frame_replacement_probe import strict_trials
 from .order_experiments import option_orders
 from .paired_reanalysis import clustered_means
@@ -119,12 +120,15 @@ def load_complete(directory, budget=None):
         or config.mode != "real"
         or config.backend != "transformers"
         or config.pilot != "both"
+        or config.encoder_model not in A4500_ENCODERS
         or any(
             not re.fullmatch(r"[0-9a-f]{40}", revision)
             for revision in (config.encoder_revision, config.vlm_revision)
         )
     ):
-        raise ValueError("Require pinned models, 224 selection and QA320")
+        raise ValueError(
+            "Require pinned reviewed encoders, 224 selection and QA320"
+        )
     if results.get("config", protocol["config"]) != protocol["config"]:
         raise ValueError("Result config differs from its protocol")
     if not protocol.get("manifest_sha256") or not protocol.get("code_sha256"):

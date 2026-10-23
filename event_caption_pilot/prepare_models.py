@@ -11,6 +11,7 @@ from typing import Any
 from .cache import write_json
 from .cli import parse_config
 from .config import Config
+from .encoders import A4500_ENCODERS
 
 LOGGER = logging.getLogger(__name__)
 
@@ -73,6 +74,14 @@ def main(arguments: list[str] | None = None) -> int:
                         help="Preserve all experiment settings from this JSON")
     parser.add_argument("--device", default=None)
     parser.add_argument("--model-cache-dir", default=None)
+    parser.add_argument(
+        "--encoder-model", choices=A4500_ENCODERS, default=None,
+        help="Replace only the selection encoder, preserving the QA model",
+    )
+    parser.add_argument(
+        "--encoder-revision", default=None,
+        help="Encoder revision; a changed model ID defaults to main",
+    )
     parser.add_argument("--output-config", type=Path,
                         default=Path("configs/real.pinned.json"))
     parser.add_argument("--manifest", default=None)
@@ -98,6 +107,14 @@ def main(arguments: list[str] | None = None) -> int:
             ("model_cache_dir", arguments_parsed.model_cache_dir),
         ) if value is not None
     }
+    if arguments_parsed.encoder_model is not None:
+        overrides["encoder_model"] = arguments_parsed.encoder_model
+        if arguments_parsed.encoder_model != config.encoder_model:
+            # A commit belongs to one repository: never carry a CLIP SHA to
+            # the new SigLIP repository. The QA model and its SHA stay fixed.
+            overrides["encoder_revision"] = "main"
+    if arguments_parsed.encoder_revision is not None:
+        overrides["encoder_revision"] = arguments_parsed.encoder_revision
     config = replace(config, **overrides)
     config.validate()
     models = prepare_models(config)

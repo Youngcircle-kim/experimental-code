@@ -24,6 +24,7 @@ from .backends import build_backend
 from .compare_budgets import validate_backend
 from .config import Config
 from .data import array_digest, decode_video, validate_video
+from .encoders import A4500_ENCODERS
 from .event_factorial import make_partitions, select_plans
 from .event_factorial_dev import validate_indices
 from .event_refinement_dev import question_from
@@ -192,7 +193,7 @@ def load_inputs(args):
         or config.frame_height != 224
         or config.frame_width != 224
         or config.vlm_model != "Qwen/Qwen3.5-4B"
-        or config.encoder_model != "openai/clip-vit-base-patch32"
+        or config.encoder_model not in A4500_ENCODERS
         or config.vlm_min_pixels != QA_SIDE**2
         or config.vlm_max_pixels != QA_SIDE**2
         or config.device != "cuda:0"
@@ -211,10 +212,11 @@ def load_inputs(args):
         )
     ):
         raise ValueError(
-            "Require pinned (40-hex revisions) CLIP + Qwen3.5-4B, real "
+            "Require pinned (40-hex revisions) reviewed 224-pixel CLIP or "
+            "SigLIP2 + Qwen3.5-4B, real "
             "cuda:0 BF16 SDPA; 2 FPS 224 candidates, 320 QA, deterministic "
             "length-normalized scoring and 5000 bootstrap samples. "
-            "Use prepare_models with configs/real.a4500.json first."
+            "Use prepare_models with an A4500 config first."
         )
     if args.frame_budget not in (16, 32, 64):
         raise ValueError("frame-budget must be 16, 32 or 64")

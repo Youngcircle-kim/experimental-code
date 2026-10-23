@@ -36,8 +36,8 @@ def validate_args(args):
         or args.minimum_free_gib <= 0
     ):
         raise ValueError("minimum-free-gib must be positive and finite")
-    if len(set(args.budgets)) != len(args.budgets) or len(args.budgets) < 2:
-        raise ValueError("Choose at least two distinct frame budgets")
+    if not args.budgets or len(set(args.budgets)) != len(args.budgets):
+        raise ValueError("Choose at least one distinct frame budget")
     if len(set(args.splits)) != len(args.splits):
         raise ValueError("Repeated splits are not allowed")
     if args.dry_run and args.decode_check:

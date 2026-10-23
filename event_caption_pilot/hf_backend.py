@@ -1,7 +1,9 @@
-"""Optional frozen CLIP + Qwen multimodal integration; loaded on request.
+"""Optional frozen CLIP/SigLIP2 + Qwen integration; loaded on request.
 
 Official API references consulted for this implementation:
 https://huggingface.co/docs/transformers/model_doc/clip
+https://huggingface.co/google/siglip2-base-patch16-224
+https://huggingface.co/docs/transformers/v5.17.0/en/model_doc/siglip2
 https://huggingface.co/Qwen/Qwen3.8-27B
 https://huggingface.co/Qwen/Qwen3.5-4B
 https://huggingface.co/docs/transformers/chat_templating
@@ -22,6 +24,7 @@ import numpy as np
 
 from .backends import validate_frames, validate_observations
 from .config import Config
+from .encoders import encoder_family
 from .types import CaptionOutput, QaOutput
 
 LOGGER = logging.getLogger(__name__)
@@ -40,14 +43,20 @@ class TransformersBackend:
             ImportError: Optional real-model dependencies are not installed.
             RuntimeError: The selected accelerator is unavailable.
         """
+        self.encoder_family = encoder_family(config.encoder_model)
         try:
             import torch
             from PIL import Image
             from transformers import (
                 AutoModelForMultimodalLM,
                 AutoProcessor,
-                CLIPModel,
             )
+            if self.encoder_family == "siglip2":
+                # The fixed-resolution SigLIP2 checkpoint has model_type
+                # 'siglip'. Siglip2Model is for the different NaFlex variant.
+                from transformers import SiglipModel as EncoderModel
+            else:
+                from transformers import CLIPModel as EncoderModel
         except ImportError as exc:
             raise ImportError(
                 "The transformers backend requires transformers==5.17.0 "
@@ -70,7 +79,7 @@ class TransformersBackend:
         if self.device.type == "mps" and not torch.backends.mps.is_available():
             raise RuntimeError("MPS was requested but is unavailable")
         self.clip = (
-            CLIPModel.from_pretrained(
+            EncoderModel.from_pretrained(
                 config.encoder_model,
                 revision=config.encoder_revision,
                 dtype=self.dtype,
@@ -136,7 +145,7 @@ class TransformersBackend:
         Returns:
             Model revisions, software versions and fixed inference settings.
         """
-        return {
+        result = {
             "backend": "transformers",
             "adapter_version": "qwen-multimodal-v2",
             "synthetic": False,
@@ -188,6 +197,31 @@ class TransformersBackend:
             "vlm_max_pixels": self.config.vlm_max_pixels,
             "clip_text_truncation": "fixed context length; warning emitted",
         }
+        if self.encoder_family == "siglip2":
+            # Keep legacy CLIP metadata byte-for-byte compatible for resume.
+            result.pop("clip_text_truncation")
+            result.update({
+                "adapter_version": "qwen-multimodal-siglip2-v1",
+                "encoder_family": "siglip2",
+                "encoder_architecture": type(self.clip).__name__,
+                "encoder_feature_source": (
+                    "vision/text pooler_output; learned heads included"
+                ),
+                "encoder_similarity": (
+                    "cosine; no logit_scale, logit_bias or sigmoid"
+                ),
+                "encoder_text_preprocessing": {
+                    "lowercase": True,
+                    "padding": "max_length",
+                    "max_length": 64,
+                    "truncation": True,
+                    "prompt_template": "raw text; no photo-label template",
+                },
+                "encoder_text_truncation": (
+                    "fixed context length; warning emitted"
+                ),
+            })
+        return result
 
     def _parameter_info(self, model: Any) -> dict[str, Any]:
         """Snapshot actual parameter placement without copying model weights.
@@ -229,7 +263,7 @@ class TransformersBackend:
         """
         if self.vlm is None or self.vlm_processor is None:
             raise RuntimeError(
-                "Pilot A loads only CLIP for detector comparison. Set "
+                "Pilot A loads only the encoder for detector comparison. Set "
                 "Config.pilot='both' to load the caption/QA model."
             )
 
@@ -293,7 +327,7 @@ class TransformersBackend:
         return result
 
     def encode_frames(self, frames: np.ndarray) -> np.ndarray:
-        """Batch frozen CLIP visual encoding using its learned projection.
+        """Batch frozen visual encoding using the trained alignment head.
 
         Args:
             frames: Original RGB candidate pool, shape (N, H, W, 3).
@@ -318,7 +352,12 @@ class TransformersBackend:
                 # Explicit projection avoids get_*_features return-type changes
                 # between Transformers 4 and 5.
                 pooled = self.clip.vision_model(**inputs).pooler_output
-                projected = self.clip.visual_projection(pooled)
+                # SigLIP's vision pooling output already includes its learned
+                # attention head. Applying CLIP's extra projection is wrong.
+                projected = (
+                    pooled if self.encoder_family == "siglip2"
+                    else self.clip.visual_projection(pooled)
+                )
                 batches.append(self._feature_array(projected, len(images)))
         self._synchronize()
         result = np.concatenate(batches, axis=0)
@@ -326,7 +365,7 @@ class TransformersBackend:
         return result
 
     def encode_visual_question(self, question: str) -> np.ndarray:
-        """Place question text in the same CLIP space as visual features.
+        """Place question text in the same space as visual features.
 
         Args:
             question: Query string, without labels or event captions.
@@ -343,11 +382,19 @@ class TransformersBackend:
             texts: Nonempty strings; long texts trigger a truncation warning.
 
         Returns:
-            Projected finite CLIP text matrix with shape (N, D).
+            Finite aligned text matrix with shape (N, D).
         """
         if not texts or any(not text.strip() for text in texts):
             raise ValueError("Text encoder requires nonempty input strings")
-        max_length = self.clip.config.text_config.max_position_embeddings
+        is_siglip2 = self.encoder_family == "siglip2"
+        # Explicit preprocessing matches SigLIP2 retrieval training even when
+        # a checkpoint's saved processor predates its current default rules.
+        # Questions stay raw questions: the photo template is for class labels.
+        texts = [text.lower() for text in texts] if is_siglip2 else texts
+        max_length = (
+            64 if is_siglip2
+            else self.clip.config.text_config.max_position_embeddings
+        )
         token_lengths = self.clip_processor.tokenizer(
             texts,
             truncation=False,
@@ -355,7 +402,10 @@ class TransformersBackend:
             return_length=True,
         )["length"]
         if any(length > max_length for length in token_lengths):
-            LOGGER.warning("CLIP text truncated to %d tokens", max_length)
+            LOGGER.warning(
+                "%s text truncated to %d tokens",
+                "SigLIP2" if is_siglip2 else "CLIP", max_length,
+            )
         batches: list[np.ndarray] = []
         self._synchronize()
         with self.torch.inference_mode():
@@ -365,13 +415,18 @@ class TransformersBackend:
                     self.clip_processor(
                         text=batch,
                         return_tensors="pt",
-                        padding=True,
+                        padding="max_length" if is_siglip2 else True,
                         truncation=True,
                         max_length=max_length,
                     )
                 )
                 pooled = self.clip.text_model(**inputs).pooler_output
-                projected = self.clip.text_projection(pooled)
+                # SigLIP text_model applies its linear head before returning
+                # pooler_output, using the final (possibly padded) token.
+                projected = (
+                    pooled if is_siglip2
+                    else self.clip.text_projection(pooled)
+                )
                 batches.append(self._feature_array(projected, len(batch)))
         self._synchronize()
         result = np.concatenate(batches, axis=0)
